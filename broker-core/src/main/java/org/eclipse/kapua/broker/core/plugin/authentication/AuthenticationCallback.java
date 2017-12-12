@@ -9,24 +9,16 @@
  * Contributors:
  *     Eurotech - initial API and implementation
  *******************************************************************************/
-package org.eclipse.kapua.broker.core.message.system;
+package org.eclipse.kapua.broker.core.plugin.authentication;
 
 import org.eclipse.kapua.broker.core.plugin.KapuaConnectionContext;
 
-/**
- * Default system message creator
- *
- * @since 1.0
- */
-public class DefaultSystemMessageCreator implements SystemMessageCreator {
+public interface AuthenticationCallback {
 
-    private final static String CONNECT_MESSAGE_TEMPLATE = "Device: [%s] - connected by user: [%s]";
-
-    @Override
-    public String createMessage(SystemMessageType systemMessageType, KapuaConnectionContext kbc) {
-        return String.format(CONNECT_MESSAGE_TEMPLATE,
-                kbc.getClientId(),
-                kbc.getUserName());
-    }
-
+    /**
+     * Return a connection id if the device is alredy connected. Null otherwise
+     * 
+     * @return
+     */
+    String getConnectionId(KapuaConnectionContext kcc);
 }
