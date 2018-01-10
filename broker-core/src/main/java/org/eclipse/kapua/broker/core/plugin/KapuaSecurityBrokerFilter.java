@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2011, 2017 Eurotech and/or its affiliates and others
+ * Copyright (c) 2011, 2018 Eurotech and/or its affiliates and others
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
@@ -15,6 +15,7 @@ package org.eclipse.kapua.broker.core.plugin;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -56,26 +57,18 @@ import org.eclipse.kapua.KapuaException;
 import org.eclipse.kapua.KapuaRuntimeException;
 import org.eclipse.kapua.broker.core.BrokerJAXBContextProvider;
 import org.eclipse.kapua.broker.core.message.MessageConstants;
-import org.eclipse.kapua.broker.core.message.system.DefaultSystemMessageCreator;
-import org.eclipse.kapua.broker.core.message.system.SystemMessageCreator;
-import org.eclipse.kapua.broker.core.message.system.SystemMessageCreator.SystemMessageType;
-import org.eclipse.kapua.broker.core.plugin.authentication.AdminAuthenticationLogic;
-import org.eclipse.kapua.broker.core.plugin.authentication.AuthenticationCallback;
-import org.eclipse.kapua.broker.core.plugin.authentication.UserAuthentictionLogic;
-import org.eclipse.kapua.broker.core.plugin.metric.ClientMetric;
+import org.eclipse.kapua.broker.core.plugin.authentication.Authenticator;
+import org.eclipse.kapua.broker.core.plugin.authentication.DefaultAuthenticator;
 import org.eclipse.kapua.broker.core.plugin.metric.LoginMetric;
 import org.eclipse.kapua.broker.core.plugin.metric.PublishMetric;
 import org.eclipse.kapua.broker.core.plugin.metric.SubscribeMetric;
-import org.eclipse.kapua.broker.core.pool.JmsAssistantProducerPool;
-import org.eclipse.kapua.broker.core.pool.JmsAssistantProducerPool.DESTINATIONS;
-import org.eclipse.kapua.broker.core.pool.JmsAssistantProducerWrapper;
 import org.eclipse.kapua.broker.core.pool.JmsConsumerWrapper;
 import org.eclipse.kapua.broker.core.setting.BrokerSetting;
 import org.eclipse.kapua.broker.core.setting.BrokerSettingKey;
 import org.eclipse.kapua.commons.security.KapuaSecurityUtils;
 import org.eclipse.kapua.commons.security.KapuaSession;
 import org.eclipse.kapua.commons.setting.system.SystemSetting;
-import org.eclipse.kapua.commons.setting.system.SystemSettingKey;
+import org.eclipse.kapua.commons.util.ClassUtil;
 import org.eclipse.kapua.commons.util.xml.XmlUtil;
 import org.eclipse.kapua.locator.KapuaLocator;
 import org.eclipse.kapua.service.account.Account;
@@ -104,7 +97,7 @@ import com.google.common.collect.ImmutableList;
  * 
  * This filter is added inside ActiveMQ filter chain plugin by {@link org.eclipse.kapua.broker.core.KapuaBrokerSecurityPlugin}
  */
-public class KapuaSecurityBrokerFilter extends BrokerFilter implements AuthenticationCallback {
+public class KapuaSecurityBrokerFilter extends BrokerFilter {
 
     protected final static Logger logger = LoggerFactory.getLogger(KapuaSecurityBrokerFilter.class);
 
@@ -116,10 +109,9 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
     public static final String VT_TOPIC_PREFIX = "VirtualTopic.";
 
     private final static String CONNECT_MESSAGE_TOPIC_PATTERN = "VirtualTopic.%s.%s.%s.MQTT.CONNECT";
-    private final static String CANNOT_LOAD_INSTANCE_ERROR_MSG = "Cannot load instance %s for %s. Please check the configuration file!";
     private final static String BROKER_IP_RESOLVER_CLASS_NAME;
     private final static String BROKER_ID_RESOLVER_CLASS_NAME;
-    private final static String SYSTEM_MESSAGE_CREATOR_CLASS_NAME;
+    private final static String AUTHENTICATOR_CLASS_NAME;
     private final static Long STEALING_LINK_INITIALIZATION_MAX_WAIT_TIME;
     private static boolean stealingLinkEnabled;
     private Future<?> stealingLinkManagerFuture;
@@ -128,7 +120,7 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
         BrokerSetting config = BrokerSetting.getInstance();
         BROKER_IP_RESOLVER_CLASS_NAME = config.getString(BrokerSettingKey.BROKER_IP_RESOLVER_CLASS_NAME);
         BROKER_ID_RESOLVER_CLASS_NAME = config.getString(BrokerSettingKey.BROKER_ID_RESOLVER_CLASS_NAME);
-        SYSTEM_MESSAGE_CREATOR_CLASS_NAME = config.getString(BrokerSettingKey.SYSTEM_MESSAGE_CREATOR_CLASS_NAME);
+        AUTHENTICATOR_CLASS_NAME = config.getString(BrokerSettingKey.AUTHENTICATOR_CLASS_NAME);
         STEALING_LINK_INITIALIZATION_MAX_WAIT_TIME = config.getLong(BrokerSettingKey.STEALING_LINK_INITIALIZATION_MAX_WAIT_TIME);
         stealingLinkEnabled = config.getBoolean(BrokerSettingKey.BROKER_STEALING_LINK_ENABLED);
     }
@@ -136,71 +128,51 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
     protected BrokerService brokerService;
     protected BrokerIpResolver brokerIpResolver;
     protected BrokerIdResolver brokerIdResolver;
-    protected SystemMessageCreator systemMessageCreator;
     protected JmsConsumerWrapper stealingLinkManagerConsumer;
     protected String brokerId;
 
     protected final static Map<String, String> CONNECTION_MAP = new ConcurrentHashMap<>();
     private final static String CONNECTOR_NAME_VM = String.format("vm://%s", BrokerSetting.getInstance().getString(BrokerSettingKey.BROKER_NAME));
-
-    private AdminAuthenticationLogic adminAuthenticationLogic;
-    private UserAuthentictionLogic userAuthentictionLogic;
+    private Authenticator authenticator;
 
     private AuthenticationService authenticationService = KapuaLocator.getInstance().getService(AuthenticationService.class);
     private CredentialsFactory credentialsFactory = KapuaLocator.getInstance().getFactory(CredentialsFactory.class);
     private AccountService accountService = KapuaLocator.getInstance().getService(AccountService.class);
 
-    private ClientMetric clientMetric = ClientMetric.getInstance();
+    private Map<String, Object> options;
+
     private LoginMetric loginMetric = LoginMetric.getInstance();
     private PublishMetric publishMetric = PublishMetric.getInstance();
     private SubscribeMetric subscribeMetric = SubscribeMetric.getInstance();
 
     public KapuaSecurityBrokerFilter(Broker next) throws KapuaException {
         super(next);
-        adminAuthenticationLogic = new AdminAuthenticationLogic(VT_TOPIC_PREFIX, SystemSetting.getInstance().getMessageClassifier(), "ActiveMQ.Advisory.>");
-        userAuthentictionLogic = new UserAuthentictionLogic(VT_TOPIC_PREFIX, SystemSetting.getInstance().getMessageClassifier(), "ActiveMQ.Advisory.>");
-
+        options = new HashMap<>();
+        options.put(Authenticator.ADDRESS_ADVISORY_PREFIX_KEY, "ActiveMQ.Advisory.>");
+        options.put(Authenticator.ADDRESS_PREFIX_KEY, VT_TOPIC_PREFIX);
+        options.put(Authenticator.ADDRESS_CLASSIFIER_KEY, SystemSetting.getInstance().getMessageClassifier());
+        options.put(Authenticator.ADDRESS_CONNECT_PATTERN_KEY, CONNECT_MESSAGE_TOPIC_PATTERN);
         XmlUtil.setContextProvider(new BrokerJAXBContextProvider());
+
     }
 
     @Override
     public void start()
             throws Exception {
         logger.info(">>> Security broker filter: calling start...");
+        logger.info(">>> Security broker filter: calling start... Initialize authenticator");
+        authenticator = ClassUtil.newInstance(AUTHENTICATOR_CLASS_NAME, DefaultAuthenticator.class, new Class<?>[] { Map.class }, new Object[] { options });
         logger.info(">>> Security broker filter: calling start... Initialize broker ip resolver");
-        brokerIpResolver = newInstance(BROKER_IP_RESOLVER_CLASS_NAME, DefaultBrokerIpResolver.class);
+        brokerIpResolver = ClassUtil.newInstance(BROKER_IP_RESOLVER_CLASS_NAME, DefaultBrokerIpResolver.class);
         logger.info(">>> Security broker filter: calling start... Initialize broker id resolver");
-        brokerIdResolver = newInstance(BROKER_ID_RESOLVER_CLASS_NAME, DefaultBrokerIdResolver.class);
+        brokerIdResolver = ClassUtil.newInstance(BROKER_ID_RESOLVER_CLASS_NAME, DefaultBrokerIdResolver.class);
         brokerId = brokerIdResolver.getBrokerId(this);
-        logger.info(">>> Security broker filter: calling start... Initialize system message creator");
-        systemMessageCreator = newInstance(SYSTEM_MESSAGE_CREATOR_CLASS_NAME, DefaultSystemMessageCreator.class);
         // start the stealing link manager
         if (stealingLinkEnabled) {
             logger.info(">>> Security broker filter: calling start... Initialize stealing link manager...");
             registerStealingLinkManager();
         }
         super.start();
-    }
-
-    protected <T> T newInstance(String clazz, Class<T> defaultInstance) throws KapuaException {
-        logger.info("Initializing instance...");
-        T instance;
-        // lazy synchronization
-        try {
-            if (!StringUtils.isEmpty(clazz)) {
-                logger.info("Initializing instance of {}...", clazz);
-                @SuppressWarnings("unchecked")
-                Class<T> clazzToInstantiate = (Class<T>) Class.forName(clazz);
-                instance = clazzToInstantiate.newInstance();
-            } else {
-                logger.info("Initializing instance of. Instantiate default instance {} ...", defaultInstance);
-                instance = defaultInstance.newInstance();
-            }
-        } catch (InstantiationException | IllegalAccessException | ClassNotFoundException e) {
-            throw new KapuaException(KapuaErrorCodes.INTERNAL_ERROR, e, String.format(CANNOT_LOAD_INSTANCE_ERROR_MSG, clazz));
-        }
-        logger.info("Initializing broker ip resolver... DONE");
-        return instance;
     }
 
     @Override
@@ -215,6 +187,13 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
         super.stop();
     }
 
+    /**
+     * Register the stealink link manager (if enabled)
+     * 
+     * @throws KapuaRuntimeException
+     * @throws JMSException
+     * @throws KapuaException
+     */
     protected void registerStealingLinkManager() throws KapuaRuntimeException, JMSException, KapuaException {
         ExecutorService executorService = Executors.newSingleThreadExecutor();
         stealingLinkManagerFuture = executorService.submit(new Runnable() {
@@ -241,6 +220,13 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
         });
     }
 
+    /**
+     * Subscribe and process the connect messages to enforce the stealing link
+     * 
+     * @throws KapuaRuntimeException
+     * @throws JMSException
+     * @throws KapuaException
+     */
     protected void subscribeStealingLinkManager() throws KapuaRuntimeException, JMSException, KapuaException {
         stealingLinkManagerConsumer = new JmsConsumerWrapper(
                 String.format(KapuaSecurityBrokerFilter.CONNECT_MESSAGE_TOPIC_PATTERN + ".>", SystemSetting.getInstance().getMessageClassifier(), "*", "*"),
@@ -326,6 +312,9 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
                 });
     }
 
+    /**
+     * Unregister the stealing link manager
+     */
     protected void unregisterStealingLinkManager() {
         if (stealingLinkManagerConsumer != null) {
             stealingLinkManagerConsumer.close();
@@ -438,21 +427,11 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
 
             kcc.update(accessToken, account.getName(), accessToken.getScopeId(), accessToken.getUserId(), (((TransportConnector) context.getConnector()).getName()),
                     brokerIpResolver.getBrokerIpOrHostName(), MULTI_ACCOUNT_CLIENT_ID);
+            kcc.updateOldConnectionId(CONNECTION_MAP.get(kcc.getFullClientId()));
             loginShiroLoginTimeContext.stop();
 
-            DefaultAuthorizationMap authMap = null;
-            if (isAdminUser(kcc)) {
-                loginMetric.getKapuasysTokenAttempt().inc();
-                List<org.eclipse.kapua.broker.core.plugin.authentication.AuthorizationEntry> authorizationEntries = adminAuthenticationLogic.connect(kcc, this);
-                authMap = buildAuthorization(kcc, authorizationEntries);
-                clientMetric.getConnectedKapuasys().inc();
-            } else {
-                loginMetric.getNormalUserAttempt().inc();
-                List<org.eclipse.kapua.broker.core.plugin.authentication.AuthorizationEntry> authorizationEntries = userAuthentictionLogic.connect(kcc, this);
-                authMap = buildAuthorization(kcc, authorizationEntries);
-                clientMetric.getConnectedClient().inc();
-                sendConnectMessage(kcc);
-            }
+            List<org.eclipse.kapua.broker.core.plugin.authentication.AuthorizationEntry> authorizationEntries = authenticator.connect(kcc);
+            DefaultAuthorizationMap authMap = buildAuthorization(kcc, authorizationEntries);
             context.setSecurityContext(new KapuaSecurityContext(kcc, authMap));
 
             // multiple account stealing link fix
@@ -502,32 +481,6 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
     }
 
     @Override
-    public String getConnectionId(KapuaConnectionContext kcc) {
-        String connectionId = CONNECTION_MAP.put(kcc.getFullClientId(), kcc.getConnectionId());
-        return connectionId;
-    }
-
-    protected void sendConnectMessage(KapuaConnectionContext kcc) {
-        Context loginSendLogingUpdateMsgTimeContex = loginMetric.getSendLoginUpdateMsgTime().time();
-        String message = systemMessageCreator.createMessage(SystemMessageType.CONNECT, kcc);
-        JmsAssistantProducerWrapper producerWrapper = null;
-        try {
-            producerWrapper = JmsAssistantProducerPool.getIOnstance(DESTINATIONS.NO_DESTINATION).borrowObject();
-            producerWrapper.send(String.format(CONNECT_MESSAGE_TOPIC_PATTERN,
-                    SystemSetting.getInstance().getMessageClassifier(), kcc.getAccountName(), kcc.getClientId()),
-                    message,
-                    kcc);
-        } catch (Exception e) {
-            logger.error("Exception sending the connect message: {}", e.getMessage(), e);
-        } finally {
-            if (producerWrapper != null) {
-                JmsAssistantProducerPool.getIOnstance(DESTINATIONS.NO_DESTINATION).returnObject(producerWrapper);
-            }
-        }
-        loginSendLogingUpdateMsgTimeContex.stop();
-    }
-
-    @Override
     public void removeConnection(ConnectionContext context, ConnectionInfo info, Throwable error)
             throws Exception {
         if (!isPassThroughConnection(context)) {
@@ -540,13 +493,7 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
                 kcc.updateOldConnectionId(CONNECTION_MAP.get(kcc.getFullClientId()));
                 // TODO fix the kapua session when run as feature will be implemented
                 KapuaSecurityUtils.setSession(new KapuaSession(kapuaPrincipal));
-                if (!isAdminUser(kcc)) {
-                    clientMetric.getDisconnectionKapuasys().inc();
-                    userAuthentictionLogic.disconnect(kcc, this, error);
-                } else {
-                    clientMetric.getDisconnectionClient().inc();
-                    adminAuthenticationLogic.disconnect(kcc, this, error);
-                }
+                authenticator.disconnect(kcc, error);
                 // multiple account stealing link fix
                 info.setClientId(kcc.getFullClientId());
                 context.setClientId(kcc.getFullClientId());
@@ -751,11 +698,6 @@ public class KapuaSecurityBrokerFilter extends BrokerFilter implements Authentic
         }
 
         return (KapuaSecurityContext) securityContext;
-    }
-
-    protected boolean isAdminUser(KapuaConnectionContext kcc) {
-        String adminUsername = SystemSetting.getInstance().getString(SystemSettingKey.SYS_ADMIN_USERNAME);
-        return kcc.getUserName().equals(adminUsername);
     }
 
 }

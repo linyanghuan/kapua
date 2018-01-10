@@ -13,6 +13,7 @@ package org.eclipse.kapua.broker.core.plugin.authentication;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.shiro.ShiroException;
 import org.eclipse.kapua.KapuaException;
@@ -29,6 +30,11 @@ import org.eclipse.kapua.service.device.registry.connection.DeviceConnectionStat
 
 import com.codahale.metrics.Timer.Context;
 
+/**
+ * User profile authentication logic implementation
+ * 
+ * @since 1.0
+ */
 public class UserAuthentictionLogic extends AuthenticationLogic {
 
     protected String aclCtrlAccReply;
@@ -44,8 +50,14 @@ public class UserAuthentictionLogic extends AuthenticationLogic {
     protected static final int DATA_VIEW_IDX = 2;
     protected static final int DATA_MANAGE_IDX = 3;
 
-    public UserAuthentictionLogic(String addressPrefix, String addressClassifier, String advisoryPrefix) {
-        super(addressPrefix, addressClassifier, advisoryPrefix);
+    /**
+     * Default constructor
+     * @param options
+     */
+    public UserAuthentictionLogic(Map<String, Object> options) {
+        super((String) options.get(Authenticator.ADDRESS_PREFIX_KEY), (String) options.get(Authenticator.ADDRESS_CLASSIFIER_KEY), (String) options.get(Authenticator.ADDRESS_ADVISORY_PREFIX_KEY));
+        String addressPrefix = (String) options.get(Authenticator.ADDRESS_PREFIX_KEY);
+        String addressClassifier = (String) options.get(Authenticator.ADDRESS_CLASSIFIER_KEY);
         aclCtrlAccReply = addressPrefix + addressClassifier + ".{0}.*.*.REPLY.>";
         aclCtrlAccCliMqttLifeCycle = addressPrefix + addressClassifier + ".{0}.{1}.MQTT.>";
         aclCtrlAcc = addressPrefix + addressClassifier + ".{0}.>";
@@ -56,7 +68,7 @@ public class UserAuthentictionLogic extends AuthenticationLogic {
     }
 
     @Override
-    public List<org.eclipse.kapua.broker.core.plugin.authentication.AuthorizationEntry> connect(KapuaConnectionContext kcc, AuthenticationCallback authenticationCallback) throws KapuaException {
+    public List<org.eclipse.kapua.broker.core.plugin.authentication.AuthorizationEntry> connect(KapuaConnectionContext kcc) throws KapuaException {
         Context loginNormalUserTimeContext = loginMetric.getNormalUserTime().time();
         Context loginCheckAccessTimeContext = loginMetric.getCheckAccessTime().time();
         boolean[] hasPermissions = new boolean[] {
@@ -82,7 +94,7 @@ public class UserAuthentictionLogic extends AuthenticationLogic {
 
         Context loginFindDevTimeContext = loginMetric.getFindDevTime().time();
 
-        String previousConnectionId = authenticationCallback.getConnectionId(kcc);
+        String previousConnectionId = kcc.getOldConnectionId();
         boolean stealingLinkDetected = (previousConnectionId != null);
         if (deviceConnection == null) {
             DeviceConnectionCreator deviceConnectionCreator = deviceConnectionFactory.newCreator(kcc.getScopeId());
@@ -123,7 +135,7 @@ public class UserAuthentictionLogic extends AuthenticationLogic {
     }
 
     @Override
-    public void disconnect(KapuaConnectionContext kcc, AuthenticationCallback authenticationCallback, Throwable error) {
+    public void disconnect(KapuaConnectionContext kcc, Throwable error) {
         boolean stealingLinkDetected = false;
         if (kcc.getOldConnectionId() != null) {
             stealingLinkDetected = !kcc.getOldConnectionId().equals(kcc.getConnectionId());

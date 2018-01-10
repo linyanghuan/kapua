@@ -44,6 +44,12 @@ import org.eclipse.kapua.service.device.registry.connection.option.DeviceConnect
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Authentication logic definition
+ * 
+ * @since 1.0
+ *
+ */
 public abstract class AuthenticationLogic {
 
     protected final static Logger logger = LoggerFactory.getLogger(AuthenticationLogic.class);
@@ -69,26 +75,76 @@ public abstract class AuthenticationLogic {
     protected PermissionFactory permissionFactory = KapuaLocator.getInstance().getFactory(PermissionFactory.class);
     protected DeviceConnectionService deviceConnectionService = KapuaLocator.getInstance().getService(DeviceConnectionService.class);
 
+    /**
+     * Default constructor
+     * 
+     * @param addressPrefix
+     *            prefix address to prepend to all the addressed when building the ACL list
+     * @param addressClassifier
+     *            address classifier used by the platform messages (not telemetry messages) (if defined by the platform)
+     * @param advisoryPrefix
+     *            address prefix for the advisory messages (if defined by the platform)
+     */
     protected AuthenticationLogic(String addressPrefix, String addressClassifier, String advisoryPrefix) {
         aclHash = addressPrefix + ">";
         aclAdvisory = addressPrefix + advisoryPrefix;
     }
 
-    public abstract List<org.eclipse.kapua.broker.core.plugin.authentication.AuthorizationEntry> connect(KapuaConnectionContext kcc, AuthenticationCallback authenticationCallback)
+    /**
+     * Execute the connect logic returning the authorization list (ACL)
+     * 
+     * @param kcc
+     * @return
+     * @throws KapuaException
+     */
+    public abstract List<org.eclipse.kapua.broker.core.plugin.authentication.AuthorizationEntry> connect(KapuaConnectionContext kcc)
             throws KapuaException;
 
-    public abstract void disconnect(KapuaConnectionContext kcc, AuthenticationCallback authenticationCallback, Throwable error);
+    /**
+     * Execute the disconnection logic
+     * 
+     * @param kcc
+     * @param error
+     */
+    public abstract void disconnect(KapuaConnectionContext kcc, Throwable error);
 
+    /**
+     * 
+     * @param kcc
+     * @return
+     */
     protected abstract List<AuthorizationEntry> buildAuthorizationMap(KapuaConnectionContext kcc);
 
+    /**
+     * Format the ACL resource based on the pattern and the account name looking into the connection context property
+     * 
+     * @param pattern
+     * @param kcc
+     * @return
+     */
     protected String formatAcl(String pattern, KapuaConnectionContext kcc) {
         return MessageFormat.format(pattern, kcc.getAccountName());
     }
 
+    /**
+     * Format the ACL resource based on the pattern and the account name and client id looking into the connection context property
+     * 
+     * @param pattern
+     * @param kcc
+     * @return
+     */
     protected String formatAclFull(String pattern, KapuaConnectionContext kcc) {
         return MessageFormat.format(pattern, kcc.getAccountName(), kcc.getClientId());
     }
 
+    /**
+     * Create the authorization entry base on the ACL and the resource address
+     * 
+     * @param kcc
+     * @param acl
+     * @param address
+     * @return
+     */
     protected AuthorizationEntry createAuthorizationEntry(KapuaConnectionContext kcc, Acl acl, String address) {
         AuthorizationEntry entry = new AuthorizationEntry(address, acl);
         kcc.addAuthDestinationToLog(MessageFormat.format(PERMISSION_LOG,
@@ -99,6 +155,16 @@ public abstract class AuthenticationLogic {
         return entry;
     }
 
+    /**
+     * Enforce the device connection/user bound (if enabled)<br>
+     * <b>Utility method used by the connection logic</b>
+     * 
+     * @param options
+     * @param deviceConnection
+     * @param scopeId
+     * @param userId
+     * @throws KapuaException
+     */
     protected void enforceDeviceConnectionUserBound(Map<String, Object> options, DeviceConnection deviceConnection, KapuaId scopeId, KapuaId userId) throws KapuaException {
         if (deviceConnection != null) {
             ConnectionUserCouplingMode connectionUserCouplingMode = deviceConnection.getUserCouplingMode();
@@ -112,6 +178,16 @@ public abstract class AuthenticationLogic {
         }
     }
 
+    /**
+     * Enforce the device connection/user bound (if enabled)<br>
+     * <b>Utility method used by the connection logic</b>
+     * 
+     * @param connectionUserCouplingMode
+     * @param deviceConnection
+     * @param scopeId
+     * @param userId
+     * @throws KapuaException
+     */
     protected void enforceDeviceUserBound(ConnectionUserCouplingMode connectionUserCouplingMode, DeviceConnection deviceConnection, KapuaId scopeId, KapuaId userId)
             throws KapuaException {
         if (ConnectionUserCouplingMode.STRICT.equals(connectionUserCouplingMode)) {
@@ -141,6 +217,15 @@ public abstract class AuthenticationLogic {
         }
     }
 
+    /**
+     * Check the connection count for a specific reserved user id<br>
+     * <b>Utility method used by the connection logic</b>
+     * 
+     * @param scopeId
+     * @param userId
+     * @param count
+     * @throws KapuaException
+     */
     protected void checkConnectionCountByReservedUserId(KapuaId scopeId, KapuaId userId, long count) throws KapuaException {
         // check that no devices have this user as strict user
         DeviceConnectionOptionQuery query = deviceConnectionOptionFactory.newQuery(scopeId);
@@ -157,6 +242,15 @@ public abstract class AuthenticationLogic {
         }
     }
 
+    /**
+     * Load the device connection/user coupling mode<br>
+     * <b>Utility method used by the connection logic</b>
+     * 
+     * @param scopeId
+     * @param options
+     * @return
+     * @throws KapuaException
+     */
     protected ConnectionUserCouplingMode loadConnectionUserCouplingModeFromConfig(KapuaId scopeId, Map<String, Object> options) throws KapuaException {
         String tmp = (String) options.get("deviceConnectionUserCouplingDefaultMode");// TODO move to constants
         if (tmp != null) {
